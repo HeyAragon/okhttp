@@ -13,343 +13,312 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package okhttp3;
+package okhttp3
 
-import java.util.Arrays;
-import java.util.List;
-import java.util.Objects;
-import javax.annotation.Nullable;
-import javax.net.ssl.SSLSocket;
-import okhttp3.internal.Util;
-
-import static okhttp3.internal.Util.concat;
-import static okhttp3.internal.Util.indexOf;
-import static okhttp3.internal.Util.intersect;
-import static okhttp3.internal.Util.nonEmptyIntersection;
-import static okhttp3.internal.Util.tlsVersionsForJavaNames;
+import okhttp3.ConnectionSpec.Builder
+import okhttp3.internal.Util
+import okhttp3.internal.Util.concat
+import okhttp3.internal.Util.indexOf
+import okhttp3.internal.Util.intersect
+import okhttp3.internal.Util.nonEmptyIntersection
+import okhttp3.internal.Util.tlsVersionsForJavaNames
+import java.util.Arrays
+import java.util.Objects
+import javax.net.ssl.SSLSocket
 
 /**
- * Specifies configuration for the socket connection that HTTP traffic travels through. For {@code
- * https:} URLs, this includes the TLS version and cipher suites to use when negotiating a secure
+ * Specifies configuration for the socket connection that HTTP traffic travels through. For `https:`
+ * URLs, this includes the TLS version and cipher suites to use when negotiating a secure
  * connection.
  *
- * <p>The TLS versions configured in a connection spec are only be used if they are also enabled in
- * the SSL socket. For example, if an SSL socket does not have TLS 1.3 enabled, it will not be used
- * even if it is present on the connection spec. The same policy also applies to cipher suites.
+ * The TLS versions configured in a connection spec are only be used if they are also enabled in the
+ * SSL socket. For example, if an SSL socket does not have TLS 1.3 enabled, it will not be used even
+ * if it is present on the connection spec. The same policy also applies to cipher suites.
  *
- * <p>Use {@link Builder#allEnabledTlsVersions()} and {@link Builder#allEnabledCipherSuites} to
- * defer all feature selection to the underlying SSL socket.
+ * Use [Builder.allEnabledTlsVersions] and [Builder.allEnabledCipherSuites] to defer all feature
+ * selection to the underlying SSL socket.
  *
- * <p>The configuration of each spec changes with each OkHttp release. This is annoying: upgrading
+ * The configuration of each spec changes with each OkHttp release. This is annoying: upgrading
  * your OkHttp library can break connectivity to certain web servers! But it’s a necessary annoyance
  * because the TLS ecosystem is dynamic and staying up to date is necessary to stay secure. See
- * <a href="https://github.com/square/okhttp/wiki/TLS-Configuration-History">OkHttp's TLS
- * Configuration History</a> to track these changes.
+ * [OkHttp's TLS
+ * Configuration History](https://github.com/square/okhttp/wiki/TLS-Configuration-History) to track
+ * these changes.
  */
-public final class ConnectionSpec {
-
-  // Most secure but generally supported list.
-  private static final CipherSuite[] RESTRICTED_CIPHER_SUITES = new CipherSuite[] {
-      // TLSv1.3.
-      CipherSuite.TLS_AES_128_GCM_SHA256,
-      CipherSuite.TLS_AES_256_GCM_SHA384,
-      CipherSuite.TLS_CHACHA20_POLY1305_SHA256,
-
-      // TLSv1.0, TLSv1.1, TLSv1.2.
-      CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-      CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-      CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-      CipherSuite.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-      CipherSuite.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-      CipherSuite.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
-  };
-
-  // This is nearly equal to the cipher suites supported in Chrome 72, current as of 2019-02-24.
-  // See https://tinyurl.com/okhttp-cipher-suites for availability.
-  private static final CipherSuite[] APPROVED_CIPHER_SUITES = new CipherSuite[] {
-      // TLSv1.3.
-      CipherSuite.TLS_AES_128_GCM_SHA256,
-      CipherSuite.TLS_AES_256_GCM_SHA384,
-      CipherSuite.TLS_CHACHA20_POLY1305_SHA256,
-
-      // TLSv1.0, TLSv1.1, TLSv1.2.
-      CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-      CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-      CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-      CipherSuite.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-      CipherSuite.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-      CipherSuite.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-
-      // Note that the following cipher suites are all on HTTP/2's bad cipher suites list. We'll
-      // continue to include them until better suites are commonly available.
-      CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-      CipherSuite.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-      CipherSuite.TLS_RSA_WITH_AES_128_GCM_SHA256,
-      CipherSuite.TLS_RSA_WITH_AES_256_GCM_SHA384,
-      CipherSuite.TLS_RSA_WITH_AES_128_CBC_SHA,
-      CipherSuite.TLS_RSA_WITH_AES_256_CBC_SHA,
-      CipherSuite.TLS_RSA_WITH_3DES_EDE_CBC_SHA,
-  };
-
-  /** A secure TLS connection that requires a recent client platform and a recent server. */
-  public static final ConnectionSpec RESTRICTED_TLS = new Builder(true)
-      .cipherSuites(RESTRICTED_CIPHER_SUITES)
-      .tlsVersions(TlsVersion.TLS_1_3, TlsVersion.TLS_1_2)
-      .supportsTlsExtensions(true)
-      .build();
-
-  /**
-   * A modern TLS configuration that works on most client platforms and can connect to most servers.
-   * This is OkHttp's default configuration.
-   */
-  public static final ConnectionSpec MODERN_TLS = new Builder(true)
-      .cipherSuites(APPROVED_CIPHER_SUITES)
-      .tlsVersions(TlsVersion.TLS_1_3, TlsVersion.TLS_1_2)
-      .supportsTlsExtensions(true)
-      .build();
-
-  /**
-   * A backwards-compatible fallback configuration that works on obsolete client platforms and can
-   * connect to obsolete servers. When possible, prefer to upgrade your client platform or server
-   * rather than using this configuration.
-   */
-  public static final ConnectionSpec COMPATIBLE_TLS = new Builder(true)
-      .cipherSuites(APPROVED_CIPHER_SUITES)
-      .tlsVersions(TlsVersion.TLS_1_3, TlsVersion.TLS_1_2, TlsVersion.TLS_1_1, TlsVersion.TLS_1_0)
-      .supportsTlsExtensions(true)
-      .build();
-
-  /** Unencrypted, unauthenticated connections for {@code http:} URLs. */
-  public static final ConnectionSpec CLEARTEXT = new Builder(false).build();
-
-  final boolean tls;
-  final boolean supportsTlsExtensions;
-  final @Nullable String[] cipherSuites;
-  final @Nullable String[] tlsVersions;
-
-  ConnectionSpec(Builder builder) {
-    this.tls = builder.tls;
-    this.cipherSuites = builder.cipherSuites;
-    this.tlsVersions = builder.tlsVersions;
-    this.supportsTlsExtensions = builder.supportsTlsExtensions;
-  }
-
-  public boolean isTls() {
-    return tls;
-  }
+class ConnectionSpec internal constructor(builder: Builder) {
+  val isTls: Boolean = builder.tls
+  internal val supportsTlsExtensions: Boolean = builder.supportsTlsExtensions
+  internal val cipherSuites: Array<String>? = builder.cipherSuites
+  internal val tlsVersions: Array<String>? = builder.tlsVersions
 
   /**
    * Returns the cipher suites to use for a connection. Returns null if all of the SSL socket's
    * enabled cipher suites should be used.
    */
-  public @Nullable List<CipherSuite> cipherSuites() {
-    return cipherSuites != null ? CipherSuite.forJavaNames(cipherSuites) : null;
+  fun cipherSuites(): List<CipherSuite>? {
+    return if (cipherSuites != null) CipherSuite.forJavaNames(*cipherSuites) else null
   }
 
   /**
    * Returns the TLS versions to use when negotiating a connection. Returns null if all of the SSL
    * socket's enabled TLS versions should be used.
    */
-  public @Nullable List<TlsVersion> tlsVersions() {
-    return tlsVersions != null ? tlsVersionsForJavaNames(tlsVersions) : null;
+  fun tlsVersions(): List<TlsVersion>? {
+    return if (tlsVersions != null) tlsVersionsForJavaNames(*tlsVersions) else null
   }
 
-  public boolean supportsTlsExtensions() {
-    return supportsTlsExtensions;
-  }
+  fun supportsTlsExtensions(): Boolean = supportsTlsExtensions
 
-  /** Applies this spec to {@code sslSocket}. */
-  void apply(SSLSocket sslSocket, boolean isFallback) {
-    ConnectionSpec specToApply = supportedSpec(sslSocket, isFallback);
+  /** Applies this spec to `sslSocket`.  */
+  internal fun apply(sslSocket: SSLSocket, isFallback: Boolean) {
+    val specToApply = supportedSpec(sslSocket, isFallback)
 
     if (specToApply.tlsVersions != null) {
-      sslSocket.setEnabledProtocols(specToApply.tlsVersions);
+      sslSocket.enabledProtocols = specToApply.tlsVersions
     }
+
     if (specToApply.cipherSuites != null) {
-      sslSocket.setEnabledCipherSuites(specToApply.cipherSuites);
+      sslSocket.enabledCipherSuites = specToApply.cipherSuites
     }
   }
 
   /**
-   * Returns a copy of this that omits cipher suites and TLS versions not enabled by {@code
-   * sslSocket}.
+   * Returns a copy of this that omits cipher suites and TLS versions not enabled by `sslSocket`.
    */
-  private ConnectionSpec supportedSpec(SSLSocket sslSocket, boolean isFallback) {
-    String[] cipherSuitesIntersection = cipherSuites != null
-        ? intersect(CipherSuite.ORDER_BY_NAME, sslSocket.getEnabledCipherSuites(), cipherSuites)
-        : sslSocket.getEnabledCipherSuites();
-    String[] tlsVersionsIntersection = tlsVersions != null
-        ? intersect(Util.NATURAL_ORDER, sslSocket.getEnabledProtocols(), tlsVersions)
-        : sslSocket.getEnabledProtocols();
+  private fun supportedSpec(sslSocket: SSLSocket, isFallback: Boolean): ConnectionSpec {
+    var cipherSuitesIntersection = if (cipherSuites != null) {
+      intersect(CipherSuite.ORDER_BY_NAME, sslSocket.enabledCipherSuites, cipherSuites)
+    } else {
+      sslSocket.enabledCipherSuites
+    }
 
-    // In accordance with https://tools.ietf.org/html/draft-ietf-tls-downgrade-scsv-00
-    // the SCSV cipher is added to signal that a protocol fallback has taken place.
-    String[] supportedCipherSuites = sslSocket.getSupportedCipherSuites();
-    int indexOfFallbackScsv = indexOf(
-        CipherSuite.ORDER_BY_NAME, supportedCipherSuites, "TLS_FALLBACK_SCSV");
+    val tlsVersionsIntersection = if (tlsVersions != null) {
+      intersect(Util.NATURAL_ORDER, sslSocket.enabledProtocols, tlsVersions)
+    } else {
+      sslSocket.enabledProtocols
+    }
+
+    // In accordance with https://tools.ietf.org/html/draft-ietf-tls-downgrade-scsv-00 the SCSV
+    // cipher is added to signal that a protocol fallback has taken place.
+    val supportedCipherSuites = sslSocket.supportedCipherSuites
+    val indexOfFallbackScsv = indexOf(
+        CipherSuite.ORDER_BY_NAME, supportedCipherSuites, "TLS_FALLBACK_SCSV")
     if (isFallback && indexOfFallbackScsv != -1) {
       cipherSuitesIntersection = concat(
-          cipherSuitesIntersection, supportedCipherSuites[indexOfFallbackScsv]);
+          cipherSuitesIntersection, supportedCipherSuites[indexOfFallbackScsv])
     }
 
-    return new Builder(this)
-        .cipherSuites(cipherSuitesIntersection)
-        .tlsVersions(tlsVersionsIntersection)
-        .build();
+    return Builder(this)
+        .cipherSuites(*cipherSuitesIntersection)
+        .tlsVersions(*tlsVersionsIntersection)
+        .build()
   }
 
   /**
-   * Returns {@code true} if the socket, as currently configured, supports this connection spec. In
+   * Returns `true` if the socket, as currently configured, supports this connection spec. In
    * order for a socket to be compatible the enabled cipher suites and protocols must intersect.
    *
-   * <p>For cipher suites, at least one of the {@link #cipherSuites() required cipher suites} must
-   * match the socket's enabled cipher suites. If there are no required cipher suites the socket
-   * must have at least one cipher suite enabled.
+   * For cipher suites, at least one of the [required cipher suites][cipherSuites] must match the
+   * socket's enabled cipher suites. If there are no required cipher suites the socket must have at
+   * least one cipher suite enabled.
    *
-   * <p>For protocols, at least one of the {@link #tlsVersions() required protocols} must match the
-   * socket's enabled protocols.
+   * For protocols, at least one of the [required protocols][tlsVersions] must match the socket's
+   * enabled protocols.
    */
-  public boolean isCompatible(SSLSocket socket) {
-    if (!tls) {
-      return false;
+  fun isCompatible(socket: SSLSocket): Boolean {
+    if (!isTls) {
+      return false
     }
 
-    if (tlsVersions != null && !nonEmptyIntersection(
-        Util.NATURAL_ORDER, tlsVersions, socket.getEnabledProtocols())) {
-      return false;
+    if (tlsVersions != null
+        && !nonEmptyIntersection(Util.NATURAL_ORDER, tlsVersions, socket.enabledProtocols)) {
+      return false
     }
 
-    if (cipherSuites != null && !nonEmptyIntersection(
-        CipherSuite.ORDER_BY_NAME, cipherSuites, socket.getEnabledCipherSuites())) {
-      return false;
+    if (cipherSuites != null
+        && !nonEmptyIntersection(
+            CipherSuite.ORDER_BY_NAME, cipherSuites, socket.enabledCipherSuites)) {
+      return false
     }
 
-    return true;
+    return true
   }
 
-  @Override public boolean equals(@Nullable Object other) {
-    if (!(other instanceof ConnectionSpec)) return false;
-    if (other == this) return true;
+  override fun equals(other: Any?): Boolean {
+    if (other !is ConnectionSpec) return false
+    if (other === this) return true
 
-    ConnectionSpec that = (ConnectionSpec) other;
-    if (this.tls != that.tls) return false;
+    val that = other as ConnectionSpec?
+    if (this.isTls != that!!.isTls) return false
 
-    if (tls) {
-      if (!Arrays.equals(this.cipherSuites, that.cipherSuites)) return false;
-      if (!Arrays.equals(this.tlsVersions, that.tlsVersions)) return false;
-      if (this.supportsTlsExtensions != that.supportsTlsExtensions) return false;
+    if (isTls) {
+      if (!Arrays.equals(this.cipherSuites, that.cipherSuites)) return false
+      if (!Arrays.equals(this.tlsVersions, that.tlsVersions)) return false
+      if (this.supportsTlsExtensions != that.supportsTlsExtensions) return false
     }
 
-    return true;
+    return true
   }
 
-  @Override public int hashCode() {
-    int result = 17;
-    if (tls) {
-      result = 31 * result + Arrays.hashCode(cipherSuites);
-      result = 31 * result + Arrays.hashCode(tlsVersions);
-      result = 31 * result + (supportsTlsExtensions ? 0 : 1);
+  override fun hashCode(): Int {
+    var result = 17
+    if (isTls) {
+      result = 31 * result + Arrays.hashCode(cipherSuites)
+      result = 31 * result + Arrays.hashCode(tlsVersions)
+      result = 31 * result + if (supportsTlsExtensions) 0 else 1
     }
-    return result;
+    return result
   }
 
-  @Override public String toString() {
-    if (!tls) {
-      return "ConnectionSpec()";
-    }
+  override fun toString(): String {
+    if (!isTls) return "ConnectionSpec()"
 
-    return "ConnectionSpec("
-        + "cipherSuites=" + Objects.toString(cipherSuites(), "[all enabled]")
-        + ", tlsVersions=" + Objects.toString(tlsVersions(), "[all enabled]")
-        + ", supportsTlsExtensions=" + supportsTlsExtensions
-        + ")";
+    return ("ConnectionSpec(" +
+        "cipherSuites=${Objects.toString(cipherSuites(), "[all enabled]")}, " +
+        "tlsVersions=${Objects.toString(tlsVersions(), "[all enabled]")}, " +
+        "supportsTlsExtensions=$supportsTlsExtensions)")
   }
 
-  public static final class Builder {
-    boolean tls;
-    @Nullable String[] cipherSuites;
-    @Nullable String[] tlsVersions;
-    boolean supportsTlsExtensions;
+  class Builder {
+    internal var tls: Boolean = false
+    internal var cipherSuites: Array<String>? = null
+    internal var tlsVersions: Array<String>? = null
+    internal var supportsTlsExtensions: Boolean = false
 
-    Builder(boolean tls) {
-      this.tls = tls;
+    internal constructor(tls: Boolean) {
+      this.tls = tls
     }
 
-    public Builder(ConnectionSpec connectionSpec) {
-      this.tls = connectionSpec.tls;
-      this.cipherSuites = connectionSpec.cipherSuites;
-      this.tlsVersions = connectionSpec.tlsVersions;
-      this.supportsTlsExtensions = connectionSpec.supportsTlsExtensions;
+    constructor(connectionSpec: ConnectionSpec) {
+      this.tls = connectionSpec.isTls
+      this.cipherSuites = connectionSpec.cipherSuites
+      this.tlsVersions = connectionSpec.tlsVersions
+      this.supportsTlsExtensions = connectionSpec.supportsTlsExtensions
     }
 
-    public Builder allEnabledCipherSuites() {
-      if (!tls) throw new IllegalStateException("no cipher suites for cleartext connections");
-      this.cipherSuites = null;
-      return this;
+    fun allEnabledCipherSuites() = apply {
+      require(tls) { "no cipher suites for cleartext connections" }
+      this.cipherSuites = null
     }
 
-    public Builder cipherSuites(CipherSuite... cipherSuites) {
-      if (!tls) throw new IllegalStateException("no cipher suites for cleartext connections");
-
-      String[] strings = new String[cipherSuites.length];
-      for (int i = 0; i < cipherSuites.length; i++) {
-        strings[i] = cipherSuites[i].javaName;
-      }
-      return cipherSuites(strings);
+    fun cipherSuites(vararg cipherSuites: CipherSuite) = apply {
+      require(tls) { "no cipher suites for cleartext connections" }
+      val strings = cipherSuites.map { it.javaName }.toTypedArray()
+      return cipherSuites(*strings)
     }
 
-    public Builder cipherSuites(String... cipherSuites) {
-      if (!tls) throw new IllegalStateException("no cipher suites for cleartext connections");
+    fun cipherSuites(vararg cipherSuites: String) = apply {
+      require(tls) { "no cipher suites for cleartext connections" }
+      require(cipherSuites.isNotEmpty()) { "At least one cipher suite is required" }
 
-      if (cipherSuites.length == 0) {
-        throw new IllegalArgumentException("At least one cipher suite is required");
-      }
-
-      this.cipherSuites = cipherSuites.clone(); // Defensive copy.
-      return this;
+      this.cipherSuites = cipherSuites.clone() as Array<String> // Defensive copy.
     }
 
-    public Builder allEnabledTlsVersions() {
-      if (!tls) throw new IllegalStateException("no TLS versions for cleartext connections");
-      this.tlsVersions = null;
-      return this;
+    fun allEnabledTlsVersions() = apply {
+      require(tls) { "no TLS versions for cleartext connections" }
+      this.tlsVersions = null
     }
 
-    public Builder tlsVersions(TlsVersion... tlsVersions) {
-      if (!tls) throw new IllegalStateException("no TLS versions for cleartext connections");
+    fun tlsVersions(vararg tlsVersions: TlsVersion) = apply {
+      require(tls) { "no TLS versions for cleartext connections" }
 
-      String[] strings = new String[tlsVersions.length];
-      for (int i = 0; i < tlsVersions.length; i++) {
-        strings[i] = tlsVersions[i].javaName();
-      }
-
-      return tlsVersions(strings);
+      val strings = tlsVersions.map { it.javaName() }.toTypedArray()
+      return tlsVersions(*strings)
     }
 
-    public Builder tlsVersions(String... tlsVersions) {
-      if (!tls) throw new IllegalStateException("no TLS versions for cleartext connections");
+    fun tlsVersions(vararg tlsVersions: String) = apply {
+      require(tls) { "no TLS versions for cleartext connections" }
+      require(tlsVersions.isNotEmpty()) { "At least one TLS version is required" }
 
-      if (tlsVersions.length == 0) {
-        throw new IllegalArgumentException("At least one TLS version is required");
-      }
-
-      this.tlsVersions = tlsVersions.clone(); // Defensive copy.
-      return this;
+      this.tlsVersions = tlsVersions.clone() as Array<String> // Defensive copy.
     }
+
+    @Deprecated("since OkHttp 3.13 all TLS-connections are expected to support TLS extensions.\n" +
+        "In a future release setting this to true will be unnecessary and setting it to false\n" +
+        "will have no effect.")
+    fun supportsTlsExtensions(supportsTlsExtensions: Boolean) = apply {
+      require(tls) { "no TLS extensions for cleartext connections" }
+      this.supportsTlsExtensions = supportsTlsExtensions
+    }
+
+    fun build(): ConnectionSpec = ConnectionSpec(this)
+  }
+
+  companion object {
+    // Most secure but generally supported list.
+    private val RESTRICTED_CIPHER_SUITES = arrayOf(
+        // TLSv1.3.
+        CipherSuite.TLS_AES_128_GCM_SHA256,
+        CipherSuite.TLS_AES_256_GCM_SHA384,
+        CipherSuite.TLS_CHACHA20_POLY1305_SHA256,
+
+        // TLSv1.0, TLSv1.1, TLSv1.2.
+        CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+        CipherSuite.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        CipherSuite.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        CipherSuite.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256)
+
+    // This is nearly equal to the cipher suites supported in Chrome 72, current as of 2019-02-24.
+    // See https://tinyurl.com/okhttp-cipher-suites for availability.
+    private val APPROVED_CIPHER_SUITES = arrayOf(
+        // TLSv1.3.
+        CipherSuite.TLS_AES_128_GCM_SHA256,
+        CipherSuite.TLS_AES_256_GCM_SHA384,
+        CipherSuite.TLS_CHACHA20_POLY1305_SHA256,
+
+        // TLSv1.0, TLSv1.1, TLSv1.2.
+        CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+        CipherSuite.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        CipherSuite.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        CipherSuite.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+
+        // Note that the following cipher suites are all on HTTP/2's bad cipher suites list. We'll
+        // continue to include them until better suites are commonly available.
+        CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+        CipherSuite.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+        CipherSuite.TLS_RSA_WITH_AES_128_GCM_SHA256,
+        CipherSuite.TLS_RSA_WITH_AES_256_GCM_SHA384,
+        CipherSuite.TLS_RSA_WITH_AES_128_CBC_SHA,
+        CipherSuite.TLS_RSA_WITH_AES_256_CBC_SHA,
+        CipherSuite.TLS_RSA_WITH_3DES_EDE_CBC_SHA)
+
+    /** A secure TLS connection that requires a recent client platform and a recent server.  */
+    @JvmField
+    val RESTRICTED_TLS = Builder(true)
+        .cipherSuites(*RESTRICTED_CIPHER_SUITES)
+        .tlsVersions(TlsVersion.TLS_1_3, TlsVersion.TLS_1_2)
+        .supportsTlsExtensions(true)
+        .build()
 
     /**
-     * @deprecated since OkHttp 3.13 all TLS-connections are expected to support TLS extensions.
-     *     In a future release setting this to true will be unnecessary and setting it to false will
-     *     have no effect.
+     * A modern TLS configuration that works on most client platforms and can connect to most servers.
+     * This is OkHttp's default configuration.
      */
-    public Builder supportsTlsExtensions(boolean supportsTlsExtensions) {
-      if (!tls) throw new IllegalStateException("no TLS extensions for cleartext connections");
-      this.supportsTlsExtensions = supportsTlsExtensions;
-      return this;
-    }
+    @JvmField
+    val MODERN_TLS = Builder(true)
+        .cipherSuites(*APPROVED_CIPHER_SUITES)
+        .tlsVersions(TlsVersion.TLS_1_3, TlsVersion.TLS_1_2)
+        .supportsTlsExtensions(true)
+        .build()
 
-    public ConnectionSpec build() {
-      return new ConnectionSpec(this);
-    }
+    /**
+     * A backwards-compatible fallback configuration that works on obsolete client platforms and can
+     * connect to obsolete servers. When possible, prefer to upgrade your client platform or server
+     * rather than using this configuration.
+     */
+    @JvmField
+    val COMPATIBLE_TLS = Builder(true)
+        .cipherSuites(*APPROVED_CIPHER_SUITES)
+        .tlsVersions(TlsVersion.TLS_1_3, TlsVersion.TLS_1_2, TlsVersion.TLS_1_1, TlsVersion.TLS_1_0)
+        .supportsTlsExtensions(true)
+        .build()
+
+    /** Unencrypted, unauthenticated connections for `http:` URLs.  */
+    @JvmField
+    val CLEARTEXT = Builder(false).build()
   }
 }
